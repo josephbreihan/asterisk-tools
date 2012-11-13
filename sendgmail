@@ -1,0 +1,95 @@
+#!/usr/bin/python2
+import sys
+import os
+import smtplib
+import email.mime
+from email.MIMEMultipart import MIMEMultipart
+from email.MIMEBase import MIMEBase
+from email.MIMEText import MIMEText
+from email import Encoders
+import mimetypes
+from pydub import AudioSegment
+import time
+import traceback
+import requests
+import subprocess
+import json
+from ConfigParser import SafeConfigParser
+
+def main():
+    parser = SafeConfigParser()
+    parser.read('sendgmail.ini')
+
+    server = parser.get('server','address')
+    port = parser.get('server','port')
+
+    sender  = parser.get('account','sender')
+    password = parser.get('account','password')
+    recipient = parser.get('account','recipient')
+    timestamp = time.mktime(time.gmtime())
+
+    url  = parser.get('server','url')
+
+    msg = email.message_from_string(sys.stdin.read())
+    subject = msg['Subject']
+
+    body = ''
+    soundfile = ''
+    for i,part in enumerate(msg.walk(),1):
+        if part.get_content_maintype() == 'multipart':
+            continue
+        ext = mimetypes.guess_extension(part.get_content_type())
+        filename='/tmp/{0}-part-{1}{2}'.format(timestamp, i, ext)
+        if 'wav' in filename:
+            fp = open(filename,'wb')
+            soundfile = filename
+            fp.write(part.get_payload(decode=True))
+            fp.close()
+        else:
+            body = part.get_payload(decode=True)
+
+    pipe = subprocess.call(['flac','-s',soundfile,'-o',soundfile.replace('wav','flac')],stderr=open('/dev/null'))
+
+    try:
+        r = requests.post(url, data=open(soundfile.replace('wav','flac'), 'rb'), headers={'Content-Type' : 'audio/x-flac; rate=8000'}) #, config={'verbose': sys.stdout} 
+        transcribedl = json.loads(r.text)
+        transcribed = transcribedl['hypotheses'][0]['utterance']
+    except Exception, reason:
+        print reason
+        traceback.print_exc()
+        return 1
+
+    mp3file=soundfile.replace('wav','mp3')
+    mp3 = AudioSegment.from_wav(soundfile)
+    mp3.export(mp3file, format="mp3")
+
+    body = "" + body + '\n' + transcribed.replace('000000000: ','') + ""
+
+    msg = MIMEMultipart()
+
+    msg['From'] = sender
+    msg['To'] = recipient
+    msg['Subject'] = subject
+
+    msg.attach(MIMEText(body))
+    part = MIMEBase('audio', 'mpeg')
+    part.set_payload(open(mp3file, 'rb').read())
+    Encoders.encode_base64(part)
+    part.add_header('Content-Disposition', 'attachment; filename="%s"' % os.path.basename(mp3file))
+    msg.attach(part)
+
+    session = smtplib.SMTP(server, port)
+
+    session.ehlo()
+    session.starttls()
+    session.ehlo
+    session.login(sender, password)
+    session.sendmail(sender, recipient, msg.as_string())
+
+    session.quit()
+    os.remove(soundfile)
+    os.remove(soundfile.replace('wav','flac'))
+    os.remove(mp3file)
+
+if __name__ == '__main__':
+    sys.exit(main())
